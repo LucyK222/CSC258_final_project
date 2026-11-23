@@ -1,0 +1,766 @@
+.data
+display_address:  .word 0x10008000
+keyboard_address: .word 0xffff0000
+bubble_colors:    .word 0xff0000, 0x00ff00, 0x0000ff, 0xffff00
+
+# 7 columns x 14 rows = 98 words (0 = empty, 1 = red, 2 = green, 3 = blue, 4 = yellow)
+grid:             .space 392
+match_grid:       .space 392
+
+# Character 1 (poop1) - A (left), D (right), S (grab), W (throw)
+p1_col:           .word 2
+p1_held_color:    .word 0
+p1_held_count:    .word 0
+
+# Character 2 (poop2) - J (left), L (right), K (grab), I (throw)
+p2_col:           .word 4
+p2_held_color:    .word 0
+p2_held_count:    .word 0
+
+# 360-degree flip animation state ('r' key)
+flip_timer:       .word 0
+flip_angle:       .word 0
+
+# Row advancement counter (advances every 10 keystrokes)
+keystroke_count:  .word 0
+
+# 4x4 Poop Sprites (4 angles for 360-degree flip)
+poop_0:
+    .word 0x000000, 0x92400E, 0x000000, 0x000000
+    .word 0x92400E, 0xD6A56D, 0x92400E, 0x000000
+    .word 0x292524, 0x92400E, 0x92400E, 0x92400E
+    .word 0x92400E, 0x292524, 0x292524, 0x92400E
+
+poop_90:
+    .word 0x92400E, 0x292524, 0x92400E, 0x000000
+    .word 0x292524, 0x92400E, 0xD6A56D, 0x92400E
+    .word 0x292524, 0x92400E, 0x92400E, 0x000000
+    .word 0x92400E, 0x92400E, 0x000000, 0x000000
+
+poop_180:
+    .word 0x92400E, 0x292524, 0x292524, 0x92400E
+    .word 0x92400E, 0x92400E, 0x92400E, 0x292524
+    .word 0x000000, 0x92400E, 0xD6A56D, 0x92400E
+    .word 0x000000, 0x000000, 0x92400E, 0x000000
+
+poop_270:
+    .word 0x000000, 0x000000, 0x92400E, 0x92400E
+    .word 0x000000, 0x92400E, 0x92400E, 0x292524
+    .word 0x92400E, 0xD6A56D, 0x92400E, 0x292524
+    .word 0x000000, 0x92400E, 0x292524, 0x92400E
+
+.text
+.globl main
+
+main:
+    jal  init_grid               # Populate top 4 rows in memory
+    jal  draw_static_borders     # Draw top, left, and right white borders
+    jal  draw_screen             # Draw initial frame ONCE
+
+game_loop:
+    
+    li   $v0, 32
+    li   $a0, 1
+    syscall
+    
+    # 1. Poll keyboard MMIO (0xffff0000)
+    lw   $t0, keyboard_address
+    lw   $t1, 0($t0)
+    bne  $t1, 1, check_flip_anim # If no key pressed, only redraw if flipping
+
+    lw   $t2, 4($t0)             # Read ASCII key from 0xffff0004
+    beq  $t2, 0x71, quit_game    # 'q' -> quit
+
+    # Poop 1 controls: a (left), d (right), s (grab), w (throw)
+    beq  $t2, 0x61, p1_left
+    beq  $t2, 0x64, p1_right
+    beq  $t2, 0x73, p1_grab
+    beq  $t2, 0x77, p1_throw
+
+    # Poop 2 controls: j (left), l (right), k (grab), i (throw)
+    beq  $t2, 0x6a, p2_left
+    beq  $t2, 0x6c, p2_right
+    beq  $t2, 0x6b, p2_grab
+    beq  $t2, 0x69, p2_throw
+
+    # Extra 360-degree flip ('r')
+    beq  $t2, 0x72, trigger_flip
+    j    check_flip_anim
+
+# =========================================================
+# Input Handlers
+# =========================================================
+p1_left:
+    lw   $t3, p1_col
+    blez $t3, sleep_step
+    addi $t3, $t3, -1
+    sw   $t3, p1_col
+    j    on_valid_keystroke
+
+p1_right:
+    lw   $t3, p1_col
+    bge  $t3, 6, sleep_step
+    addi $t3, $t3, 1
+    sw   $t3, p1_col
+    j    on_valid_keystroke
+
+p1_grab:
+    la   $a0, p1_col
+    la   $a1, p1_held_color
+    la   $a2, p1_held_count
+    jal  grab_bubble
+    j    on_valid_keystroke
+
+p1_throw:
+    la   $a0, p1_col
+    la   $a1, p1_held_color
+    la   $a2, p1_held_count
+    jal  throw_bubble
+    bltz $v0, on_valid_keystroke
+    move $a0, $v0
+    jal  resolve_matches
+    j    on_valid_keystroke
+
+p2_left:
+    lw   $t3, p2_col
+    blez $t3, sleep_step
+    addi $t3, $t3, -1
+    sw   $t3, p2_col
+    j    on_valid_keystroke
+
+p2_right:
+    lw   $t3, p2_col
+    bge  $t3, 6, sleep_step
+    addi $t3, $t3, 1
+    sw   $t3, p2_col
+    j    on_valid_keystroke
+
+p2_grab:
+    la   $a0, p2_col
+    la   $a1, p2_held_color
+    la   $a2, p2_held_count
+    jal  grab_bubble
+    j    on_valid_keystroke
+
+p2_throw:
+    la   $a0, p2_col
+    la   $a1, p2_held_color
+    la   $a2, p2_held_count
+    jal  throw_bubble
+    bltz $v0, on_valid_keystroke
+    move $a0, $v0
+    jal  resolve_matches
+    j    on_valid_keystroke
+
+trigger_flip:
+    li   $t3, 16                 # 16 frames total (4 frames per 90 deg)
+    sw   $t3, flip_timer
+    sw   $zero, flip_angle
+    jal  draw_screen
+    j    sleep_step
+
+# =========================================================
+# Row Advancement (every 10 keystrokes) & Game Over Check
+# =========================================================
+on_valid_keystroke:
+    lw   $t3, keystroke_count
+    addi $t3, $t3, 1
+    sw   $t3, keystroke_count
+    blt  $t3, 10, redraw_and_sleep
+
+    # Reset counter and push rows down by 1
+    sw   $zero, keystroke_count
+    jal  advance_row
+
+    # Game Over check: if any bubble reached row 13
+    la   $t4, grid
+    addi $t4, $t4, 364           # Row 13 start: 13 * 7 * 4
+    li   $t5, 0
+check_gameover_loop:
+    lw   $t6, 0($t4)
+    bne  $t6, $zero, quit_game
+    addi $t4, $t4, 4
+    addi $t5, $t5, 1
+    blt  $t5, 7, check_gameover_loop
+    j    redraw_and_sleep
+
+# =========================================================
+# Animation Update & Conditional Redraw (No Flicker!)
+# =========================================================
+check_flip_anim:
+    lw   $t3, flip_timer
+    blez $t3, sleep_step         # Nothing changed -> DO NOT redraw
+
+    addi $t3, $t3, -1
+    sw   $t3, flip_timer
+
+    andi $t4, $t3, 3             # Update angle every 4 frames
+    bne  $t4, $zero, sleep_step
+    lw   $t5, flip_angle
+    addi $t5, $t5, 1
+    andi $t5, $t5, 3
+    sw   $t5, flip_angle
+
+redraw_and_sleep:
+    jal  draw_screen             # Only redraw when state actually changed!
+
+sleep_step:
+    li   $v0, 32                 # Sleep ~16ms (60 FPS)
+    li   $a0, 16
+    syscall
+    j    game_loop
+
+quit_game:
+    li   $v0, 10
+    syscall
+
+# =========================================================
+# Subroutines
+# =========================================================
+
+init_grid:
+    addi $sp, $sp, -4
+    sw   $ra, 0($sp)
+    
+    la   $t4, grid
+    li   $t5, 0
+init_grid_loop:
+    li   $v0, 42
+    li   $a0, 0
+    li   $a1, 4
+    syscall
+    addi $a0, $a0, 1
+    sw   $a0, 0($t4)
+    addi $t4, $t4, 4
+    addi $t5, $t5, 1
+    blt  $t5, 28, init_grid_loop
+    
+    li   $a0, -1
+    jal  resolve_matches
+    lw   $ra, 0($sp)
+    addi $sp, $sp, 4
+    jr   $ra
+
+draw_static_borders:
+    lw   $t0, display_address
+    li   $t1, 0xffffff
+    li   $t2, 8
+top_border_loop:
+    sll  $t4, $t2, 2
+    addi $t5, $t0, 512
+    add  $t5, $t5, $t4
+    sw   $t1, 0($t5)
+    addi $t5, $t5, 256
+    sw   $t1, 0($t5)
+    addi $t2, $t2, 1
+    bne  $t2, 40, top_border_loop
+
+    li   $t2, 2
+side_border_loop:
+    sll  $t4, $t2, 8
+    add  $t5, $t0, $t4
+    sw   $t1, 32($t5)
+    sw   $t1, 36($t5)
+    sw   $t1, 152($t5)
+    sw   $t1, 156($t5)
+    addi $t2, $t2, 1
+    bne  $t2, 62, side_border_loop
+    jr   $ra
+
+draw_bottom_border:
+    lw   $t0, display_address
+    li   $t1, 0xffffff
+    li   $t2, 8
+bot_border_loop:
+    sll  $t4, $t2, 2
+    addi $t5, $t0, 15360
+    add  $t5, $t5, $t4
+    sw   $t1, 0($t5)
+    addi $t5, $t5, 256
+    sw   $t1, 0($t5)
+    addi $t2, $t2, 1
+    bne  $t2, 40, bot_border_loop
+    jr   $ra
+
+# Grab bottom-most same-colored bubbles in column
+grab_bubble:
+    lw   $t0, 0($a0)             # col
+    la   $t1, grid
+    li   $t2, 13                 # Start at bottom row (13)
+
+find_bottom_loop:
+    bltz $t2, grab_done
+    mul  $t3, $t2, 7
+    add  $t3, $t3, $t0
+    sll  $t3, $t3, 2
+    add  $t4, $t1, $t3
+    lw   $t5, 0($t4)
+    bne  $t5, $zero, found_bubble
+    addi $t2, $t2, -1
+    j    find_bottom_loop
+
+found_bubble:
+    lw   $t6, 0($a2)             # held_count
+    lw   $t7, 0($a1)             # held_color
+    beq  $t6, $zero, collect_chain
+    bne  $t7, $t5, grab_done
+
+collect_chain:
+    sw   $t5, 0($a1)
+collect_loop:
+    bltz $t2, grab_done
+    mul  $t3, $t2, 7
+    add  $t3, $t3, $t0
+    sll  $t3, $t3, 2
+    add  $t4, $t1, $t3
+    lw   $t8, 0($t4)
+    bne  $t8, $t5, grab_done
+
+    sw   $zero, 0($t4)
+    addi $t6, $t6, 1
+    sw   $t6, 0($a2)
+    addi $t2, $t2, -1
+    j    collect_loop
+
+grab_done:
+    jr   $ra
+
+# Throw held bubbles upward into the column above the character
+# $a0 = &p_col, $a1 = &p_held_color, $a2 = &p_held_count
+throw_bubble:
+    lw   $t6, 0($a2)             # held_count
+    blez $t6, throw_nothing         # Nothing held -> do nothing
+
+    lw   $t0, 0($a0)             # col
+    lw   $t5, 0($a1)             # held_color
+    la   $t1, grid
+    li   $t2, 13                  # Scan from top (0) down to find first empty slot
+
+find_lowest_loop:
+    bgt  $t2, 13, stack_overflow
+    mul  $t3, $t2, 7
+    add  $t3, $t3, $t0
+    sll  $t3, $t3, 2
+    add  $t4, $t1, $t3
+    lw   $t7, 0($t4)
+    bne  $t7, $zero, land_below_lowest
+    addi $t2, $t2, -1
+    j    find_lowest_loop
+start_at_top:
+    li   $t2, 0
+    j    place_thrown_bubbles
+    
+land_below_lowest:
+    addi $t2, $t2, 1
+    
+place_thrown_bubbles:
+    blez $t6, finish_throw
+    bgt  $t2, 13, stack_overflow
+    mul  $t3, $t2, 7
+    add  $t3, $t3, $t0
+    sll  $t3, $t3, 2
+    add  $t4, $t1, $t3
+    sw   $t5, 0($t4)             # Place bubble in grid[row][col]
+    addi $t2, $t2, 1
+    addi $t6, $t6, -1
+    j    place_thrown_bubbles
+
+finish_throw:
+    sw   $zero, 0($a1)           # held_color = 0
+    sw   $zero, 0($a2)           # held_count = 0
+    move $v0, $t0
+    jr   $ra
+
+throw_nothing:
+    li   $v0, -1
+    jr   $ra
+
+stack_overflow:
+    j    quit_game               # Stack reached bottom row -> Game Over
+
+# =========================================================
+# Milestone 3: Vertical Match-3 -> Flood-Fill -> Upward Gravity
+# =========================================================
+resolve_matches:
+    addi $sp, $sp, -24
+    sw   $ra, 0($sp)
+    sw   $s0, 4($sp)
+    sw   $s1, 8($sp)
+    sw   $s2, 12($sp)
+    sw   $s3, 16($sp)
+    
+    move $s4, $a0
+
+chain_loop:
+    # A. Clear match_grid (98 words)
+    la   $t0, match_grid
+    li   $t1, 0
+clear_match_grid:
+    sw   $zero, 0($t0)
+    addi $t0, $t0, 4
+    addi $t1, $t1, 1
+    blt  $t1, 98, clear_match_grid
+
+    li   $s0, 0                  # $s0 = match_found flag
+
+    # B. Stage 1: Scan columns for vertical match-3 triggers
+    li   $s1, 0                  # col = 0..6
+vert_col_loop:
+    bltz $s4, check_this_col     # [ADDED] If $s4 < 0, check all columns
+    bne  $s1, $s4, next_vert_col # [ADDED] On pass 1, only trigger on thrown column
+
+check_this_col:                  # [ADDED]
+    li   $s2, 0                  # row = 0..111
+vert_row_loop:
+    mul  $t0, $s2, 7
+    add  $t0, $t0, $s1
+    sll  $t0, $t0, 2             # Byte offset of (row, col)
+    la   $t1, grid
+    add  $t2, $t1, $t0
+    lw   $t3, 0($t2)             # grid[row][col]
+    beq  $t3, $zero, next_vert_row
+
+    lw   $t4, 28($t2)            # grid[row+1][col] (+28 bytes)
+    bne  $t3, $t4, next_vert_row
+    lw   $t5, 56($t2)            # grid[row+2][col] (+56 bytes)
+    bne  $t3, $t5, next_vert_row
+
+    # Mark all 3 cells in match_grid
+    la   $t6, match_grid
+    add  $t6, $t6, $t0
+    li   $t7, 1
+    sw   $t7, 0($t6)
+    sw   $t7, 28($t6)
+    sw   $t7, 56($t6)
+    li   $s0, 1                  # match_found = 1
+
+next_vert_row:
+    addi $s2, $s2, 1
+    blt  $s2, 12, vert_row_loop
+    addi $s1, $s1, 1
+    blt  $s1, 7, vert_col_loop
+
+    # If no vertical match-3 triggered, exit chain_loop
+    beq  $s0, $zero, resolve_done
+next_vert_col:
+    addi $s1, $s1, 1
+    blt  $s1, 7, vert_col_loop
+
+    # If no vertical match-3 triggered, exit chain_loop
+    beq  $s0, $zero, resolve_done
+
+    # C. Stage 2: Flood-fill connected same-color neighbors
+flood_pass:
+    li   $s3, 0                  # $s3 = changed flag
+    li   $s2, 0                  # row = 0..13
+flood_row:
+    li   $s1, 0                  # col = 0..6
+flood_col:
+    mul  $t0, $s2, 7
+    add  $t0, $t0, $s1
+    sll  $t0, $t0, 2
+
+    la   $t1, match_grid
+    add  $t2, $t1, $t0
+    lw   $t3, 0($t2)
+    beq  $t3, $zero, next_flood_cell
+
+    la   $t4, grid
+    add  $t5, $t4, $t0
+    lw   $t6, 0($t5)             # Target color of matched cell
+
+    # Check UP (row > 0)
+    blez $s2, check_down
+    lw   $t7, -28($t2)
+    bne  $t7, $zero, check_down
+    lw   $t8, -28($t5)
+    bne  $t8, $t6, check_down
+    li   $t9, 1
+    sw   $t9, -28($t2)
+    li   $s3, 1
+
+check_down:
+    bge  $s2, 13, check_left
+    lw   $t7, 28($t2)
+    bne  $t7, $zero, check_left
+    lw   $t8, 28($t5)
+    bne  $t8, $t6, check_left
+    li   $t9, 1
+    sw   $t9, 28($t2)
+    li   $s3, 1
+
+check_left:
+    blez $s1, check_right
+    lw   $t7, -4($t2)
+    bne  $t7, $zero, check_right
+    lw   $t8, -4($t5)
+    bne  $t8, $t6, check_right
+    li   $t9, 1
+    sw   $t9, -4($t2)
+    li   $s3, 1
+
+check_right:
+    bge  $s1, 6, next_flood_cell
+    lw   $t7, 4($t2)
+    bne  $t7, $zero, next_flood_cell
+    lw   $t8, 4($t5)
+    bne  $t8, $t6, next_flood_cell
+    li   $t9, 1
+    sw   $t9, 4($t2)
+    li   $s3, 1
+
+next_flood_cell:
+    addi $s1, $s1, 1
+    blt  $s1, 7, flood_col
+    addi $s2, $s2, 1
+    blt  $s2, 14, flood_row
+    bne  $s3, $zero, flood_pass  # Repeat until flood-fill stabilizes
+
+    # D. Delete all marked bubbles
+    la   $t0, grid
+    la   $t1, match_grid
+    li   $t2, 0
+delete_loop:
+    lw   $t3, 0($t1)
+    beq  $t3, $zero, skip_delete
+    sw   $zero, 0($t0)
+skip_delete:
+    addi $t0, $t0, 4
+    addi $t1, $t1, 4
+    addi $t2, $t2, 1
+    blt  $t2, 98, delete_loop
+
+    # E. Apply upward gravity (float bubbles toward row 0)
+    li   $s1, 0                  # col = 0..6
+grav_col_loop:
+    li   $t0, 0                  # write_row = 0
+    li   $t1, 0                  # read_row = 0
+grav_read_loop:
+    mul  $t2, $t1, 7
+    add  $t2, $t2, $s1
+    sll  $t2, $t2, 2
+    la   $t3, grid
+    add  $t2, $t3, $t2
+    lw   $t4, 0($t2)             # grid[read_row][col]
+    beq  $t4, $zero, next_grav_read
+
+    mul  $t5, $t0, 7
+    add  $t5, $t5, $s1
+    sll  $t5, $t5, 2
+    add  $t5, $t3, $t5
+    sw   $t4, 0($t5)             # grid[write_row][col] = value
+    addi $t0, $t0, 1             # write_row++
+
+next_grav_read:
+    addi $t1, $t1, 1
+    blt  $t1, 14, grav_read_loop
+
+    # Fill remaining rows (write_row..13) with 0
+grav_fill_zero:
+    bge  $t0, 14, next_grav_col
+    mul  $t5, $t0, 7
+    add  $t5, $t5, $s1
+    sll  $t5, $t5, 2
+    la   $t3, grid
+    add  $t5, $t3, $t5
+    sw   $zero, 0($t5)
+    addi $t0, $t0, 1
+    j    grav_fill_zero
+
+next_grav_col:
+    addi $s1, $s1, 1
+    blt  $s1, 7, grav_col_loop
+
+    # F. Repeat chain_loop to check for cascade matches!
+    li   $s4, -1
+    j    chain_loop
+
+resolve_done:
+    lw   $ra, 0($sp)
+    lw   $s0, 4($sp)
+    lw   $s1, 8($sp)
+    lw   $s2, 12($sp)
+    lw   $s3, 16($sp)
+    lw   $s4, 20($sp)
+    addi $sp, $sp, 24
+    jr   $ra
+
+advance_row:
+    la   $t0, grid
+    li   $t1, 13
+shift_row_loop:
+    beq  $t1, $zero, fill_top_row
+    li   $t2, 0
+shift_col_loop:
+    addi $t3, $t1, -1
+    mul  $t4, $t3, 7
+    add  $t4, $t4, $t2
+    sll  $t4, $t4, 2
+    add  $t4, $t0, $t4
+    lw   $t5, 0($t4)
+
+    mul  $t6, $t1, 7
+    add  $t6, $t6, $t2
+    sll  $t6, $t6, 2
+    add  $t6, $t0, $t6
+    sw   $t5, 0($t6)
+
+    addi $t2, $t2, 1
+    blt  $t2, 7, shift_col_loop
+    addi $t1, $t1, -1
+    j    shift_row_loop
+
+fill_top_row:
+    li   $t2, 0
+fill_top_loop:
+    li   $v0, 42
+    li   $a0, 0
+    li   $a1, 4
+    syscall
+    addi $a0, $a0, 1
+    sw   $a0, 0($t0)
+    addi $t0, $t0, 4
+    addi $t2, $t2, 1
+    blt  $t2, 7, fill_top_loop
+    jr   $ra
+
+draw_screen:
+    addi $sp, $sp, -4
+    sw   $ra, 0($sp)
+
+    lw   $t0, display_address
+
+    # Clear playfield interior (X = 10..37, Y = 4..63)
+    li   $t1, 4
+clear_y_loop:
+    li   $t2, 10
+clear_x_loop:
+    sll  $t3, $t1, 8
+    sll  $t4, $t2, 2
+    add  $t3, $t3, $t4
+    add  $t3, $t0, $t3
+    sw   $zero, 0($t3)
+    addi $t2, $t2, 1
+    blt  $t2, 38, clear_x_loop
+    addi $t1, $t1, 1
+    blt  $t1, 64, clear_y_loop
+
+    # Draw grid bubbles
+    li   $s0, 0
+draw_grid_row:
+    li   $s1, 0
+draw_grid_col:
+    mul  $t1, $s0, 7
+    add  $t1, $t1, $s1
+    sll  $t1, $t1, 2
+    la   $t2, grid
+    add  $t2, $t2, $t1
+    lw   $t3, 0($t2)
+    beq  $t3, $zero, next_grid_cell
+
+    addi $t3, $t3, -1
+    sll  $t3, $t3, 2
+    la   $t4, bubble_colors
+    add  $t4, $t4, $t3
+    lw   $s3, 0($t4)
+
+    sll  $t6, $s1, 2
+    addi $t6, $t6, 10
+    sll  $t7, $s0, 2
+    addi $t7, $t7, 4
+
+    li   $t8, 0
+b_pix_y:
+    li   $t9, 0
+b_pix_x:
+    add  $a2, $t7, $t8
+    sll  $a2, $a2, 8
+    add  $a3, $t6, $t9
+    sll  $a3, $a3, 2
+    add  $a2, $a2, $a3
+    add  $a2, $t0, $a2
+    sw   $s3, 0($a2)
+    addi $t9, $t9, 1
+    blt  $t9, 4, b_pix_x
+    addi $t8, $t8, 1
+    blt  $t8, 4, b_pix_y
+
+next_grid_cell:
+    addi $s1, $s1, 1
+    blt  $s1, 7, draw_grid_col
+    addi $s0, $s0, 1
+    blt  $s0, 14, draw_grid_row
+
+    # Redraw bottom border so characters cross over it
+    jal  draw_bottom_border
+
+    # Draw poop1 and poop2
+    lw   $a0, p1_col
+    lw   $a1, p1_held_color
+    lw   $a2, p1_held_count
+    jal  draw_single_poop
+
+    lw   $a0, p2_col
+    lw   $a1, p2_held_color
+    lw   $a2, p2_held_count
+    jal  draw_single_poop
+
+    lw   $ra, 0($sp)
+    addi $sp, $sp, 4
+    jr   $ra
+
+draw_single_poop:
+    lw   $t0, display_address
+    sll  $t1, $a0, 2
+    addi $t1, $t1, 10
+
+    # Draw held bubble indicator above poop if holding ($a2 > 0)
+    blez $a2, select_poop_sprite
+    addi $t2, $a1, -1
+    sll  $t2, $t2, 2
+    la   $t3, bubble_colors
+    add  $t3, $t3, $t2
+    lw   $t4, 0($t3)
+
+    addi $t5, $t1, 1
+    sll  $t5, $t5, 2
+    addi $t6, $t0, 14592         # Y = 57
+    add  $t6, $t6, $t5
+    sw   $t4, 0($t6)
+    sw   $t4, 4($t6)
+    sw   $t4, 256($t6)
+    sw   $t4, 260($t6)
+
+select_poop_sprite:
+    lw   $t2, flip_angle
+    la   $t6, poop_0
+    beq  $t2, 0, draw_poop_pixels
+    la   $t6, poop_90
+    beq  $t2, 1, draw_poop_pixels
+    la   $t6, poop_180
+    beq  $t2, 2, draw_poop_pixels
+    la   $t6, poop_270
+
+draw_poop_pixels:
+    li   $t7, 0
+p_row_loop:
+    li   $t8, 0
+p_col_loop:
+    lw   $t9, 0($t6)
+    beq  $t9, $zero, p_skip_pixel
+
+    addi $a2, $t7, 60            # Y = 60 + row (crosses over Y=60..61 border)
+    sll  $a2, $a2, 8
+    add  $a3, $t1, $t8
+    sll  $a3, $a3, 2
+    add  $a2, $a2, $a3
+    add  $a2, $t0, $a2
+    sw   $t9, 0($a2)
+
+p_skip_pixel:
+    addi $t6, $t6, 4
+    addi $t8, $t8, 1
+    blt  $t8, 4, p_col_loop
+    addi $t7, $t7, 1
+    blt  $t7, 4, p_row_loop
+    jr   $ra
