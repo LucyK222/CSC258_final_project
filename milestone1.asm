@@ -1,19 +1,77 @@
+################# CSC258 Assembly Final Project ###################
+# This file contains our implementation of Magical Drop.
+#
+# Student 1: Jiayun Kang, 1009918074
+# Student 2: Name, Student Number (if applicable)
+#
+# We assert that the code submitted here is entirely our own 
+# creation, and will indicate otherwise when it is not.
+#
+######################## Bitmap Display Configuration ########################
+# - Unit width in pixels: 1
+# - Unit height in pixels: 1
+# - Display width in pixels: 64
+# - Display height in pixels: 64
+# - Base Address for Display:   0x10008000 ($gp)
+##############################################################################
 
-.data
-display_address: .word 0x10008000
-bubble_colors: .word 0xff0000, 0x00ff00, 0x0000ff, 0xffff00
-# Pink flower sprite (4 rows x 4 columns)
-# 0 means transparent
-flower_sprite:
+    .data
+##############################################################################
+# Immutable Data
+##############################################################################
+# The address of the bitmap display. Don't forget to connect it!
+ADDR_DSPL:
+    .word 0x10008000
+# The address of the keyboard. Don't forget to connect it!
+ADDR_KBRD:
+    .word 0xffff0000
+
+##############################################################################
+# Mutable Data
+##############################################################################
+bubble_colors:
+    .word 0xff0000, 0x00ff00, 0x0000ff, 0xffff00
+
+# Poop character 1
+poop_sprite:
     .word 0x000000, 0x92400E, 0x000000, 0x000000
     .word 0x92400E, 0xD6A56D, 0x92400E, 0x000000
     .word 0x292524, 0x92400E, 0x92400E, 0x92400E
     .word 0x92400E, 0x292524, 0x292524, 0x92400E
 
-.text
+##############################################################################
+# Code
+##############################################################################
+	.text
+	.globl main
+
+    # Run the game.
 main:
+    # Initialize the game
+    lw $t0, ADDR_DSPL
+    li $t1, 0xffffff
+
+game_loop:
+    # 1a. Check if key has been pressed
+    # 1b. Check which key has been pressed
+
+    # 2a. Check for collisions
+    # 2b. Update locations (capsules)
+
+    # 3. Draw the screen
+    jal draw_screen
+
+    # 4. Sleep
+    li $v0, 32
+    li $a0, 16
+    syscall
+
+    # 5. Go back to Step 1
+    j game_loop
+    
+draw_screen:
     # Initialize
-    lw   $t0, display_address
+    lw   $t0, ADDR_DSPL
     li   $t1, 0xffffff       # Frame colour: white
 
     # --------------------------------
@@ -176,7 +234,7 @@ bubble_pixel_col:
     # Loop 4: Draw pink flower character
     # =========================================
 
-    la   $t6, flower_sprite  # Address of flower data
+    la   $t6, poop_sprite  # Address of flower data
 
     li   $t7, 0              # Current flower row
 
@@ -223,3 +281,5 @@ flower_skip_draw:
     # Exit
     li   $v0, 10
     syscall
+
+
