@@ -1,3 +1,10 @@
+# CSC258 Magical Drop - Milestones 2 and 3 (corrected)
+# Bitmap configuration: unit 8x8, display 256x256, base 0x10008000
+# Keyboard: MARS Keyboard and Display MMIO / Saturn Bitmap input
+# Corrections: bounded underside-stack throw, initial no-triple generation,
+# successful throw key counting; matching/flood-fill/float/chain retained.
+# Review and adapt this code for your project submission.
+
 .data
 display_address:  .word 0x10008000
 keyboard_address: .word 0xffff0000
@@ -168,7 +175,7 @@ on_valid_keystroke:
     sw   $t3, keystroke_count
     blt  $t3, 10, redraw_and_sleep
 
-    # Reset counter and push rows down by 1
+    # Reset counter and push rows down by 1.
     sw   $zero, keystroke_count
     jal  advance_row
 
@@ -205,7 +212,7 @@ redraw_and_sleep:
     jal  draw_screen             # Only redraw when state actually changed!
 
 sleep_step:
-    li   $v0, 32                 # Sleep ~16ms (60 FPS)
+    li   $v0, 32                 # Throttle polling
     li   $a0, 16
     syscall
     j    game_loop
@@ -218,27 +225,27 @@ quit_game:
 # Subroutines
 # =========================================================
 
+# Fill the first four rows with random colours, avoiding pre-existing
+# vertical triples. Match removal should be initiated by gameplay throws.
 init_grid:
-    addi $sp, $sp, -4
-    sw   $ra, 0($sp)
-    
     la   $t4, grid
-    li   $t5, 0
+    li   $t5, 0                  # Linear index, 0..27
 init_grid_loop:
     li   $v0, 42
     li   $a0, 0
     li   $a1, 4
     syscall
-    addi $a0, $a0, 1
+    addi $a0, $a0, 1            # Colours 1..4
+    blt  $t5, 14, init_store     # First two rows cannot make a triple
+    lw   $t6, -28($t4)          # Same column, preceding row
+    bne  $a0, $t6, init_store
+    lw   $t7, -56($t4)          # Same column, two rows above
+    beq  $a0, $t7, init_grid_loop
+init_store:
     sw   $a0, 0($t4)
     addi $t4, $t4, 4
     addi $t5, $t5, 1
     blt  $t5, 28, init_grid_loop
-    
-    li   $a0, -1
-    jal  resolve_matches
-    lw   $ra, 0($sp)
-    addi $sp, $sp, 4
     jr   $ra
 
 draw_static_borders:
@@ -328,55 +335,61 @@ grab_done:
 # Throw held bubbles upward into the column above the character
 # $a0 = &p_col, $a1 = &p_held_color, $a2 = &p_held_count
 throw_bubble:
-    lw   $t6, 0($a2)             # held_count
-    blez $t6, throw_nothing         # Nothing held -> do nothing
-
-    lw   $t0, 0($a0)             # col
-    lw   $t5, 0($a1)             # held_color
+    lw   $t6, 0($a2)            # Number held
+    blez $t6, throw_nothing
+    lw   $t0, 0($a0)            # Target column
+    lw   $t5, 0($a1)            # Held colour
     la   $t1, grid
-    li   $t2, 13                  # Scan from top (0) down to find first empty slot
+    li   $t2, 13                # Search UP from bottom
 
-find_lowest_loop:
-    bgt  $t2, 13, stack_overflow
+throw_find_bottom:
+    bltz $t2, throw_empty_column
     mul  $t3, $t2, 7
     add  $t3, $t3, $t0
     sll  $t3, $t3, 2
     add  $t4, $t1, $t3
     lw   $t7, 0($t4)
-    bne  $t7, $zero, land_below_lowest
+    bne  $t7, $zero, throw_bottom_found
     addi $t2, $t2, -1
-    j    find_lowest_loop
-start_at_top:
-    li   $t2, 0
-    j    place_thrown_bubbles
-    
-land_below_lowest:
-    addi $t2, $t2, 1
-    
-place_thrown_bubbles:
-    blez $t6, finish_throw
-    bgt  $t2, 13, stack_overflow
+    j    throw_find_bottom
+
+throw_empty_column:
+    li   $t2, 0                # An empty column starts at the top
+    j    throw_check_space
+
+throw_bottom_found:
+    addi $t2, $t2, 1           # Join underside of existing top stack
+
+throw_check_space:
+    # All held bubbles must fit in rows 0..13.
+    add  $t7, $t2, $t6
+    bgt  $t7, 14, throw_no_space
+
+throw_place_loop:
+    blez $t6, throw_finished
     mul  $t3, $t2, 7
     add  $t3, $t3, $t0
     sll  $t3, $t3, 2
     add  $t4, $t1, $t3
-    sw   $t5, 0($t4)             # Place bubble in grid[row][col]
+    sw   $t5, 0($t4)
     addi $t2, $t2, 1
     addi $t6, $t6, -1
-    j    place_thrown_bubbles
+    j    throw_place_loop
 
-finish_throw:
-    sw   $zero, 0($a1)           # held_color = 0
-    sw   $zero, 0($a2)           # held_count = 0
-    move $v0, $t0
+throw_finished:
+    sw   $zero, 0($a1)
+    sw   $zero, 0($a2)
+    move $v0, $t0              # Newly changed column
+    jr   $ra
+
+throw_no_space:
+    # Keep the collected bubbles rather than partially writing the throw.
+    li   $v0, -1
     jr   $ra
 
 throw_nothing:
     li   $v0, -1
     jr   $ra
-
-stack_overflow:
-    j    quit_game               # Stack reached bottom row -> Game Over
 
 # =========================================================
 # Milestone 3: Vertical Match-3 -> Flood-Fill -> Upward Gravity
@@ -388,6 +401,7 @@ resolve_matches:
     sw   $s1, 8($sp)
     sw   $s2, 12($sp)
     sw   $s3, 16($sp)
+    sw   $s4, 20($sp)
     
     move $s4, $a0
 
@@ -410,7 +424,7 @@ vert_col_loop:
     bne  $s1, $s4, next_vert_col # [ADDED] On pass 1, only trigger on thrown column
 
 check_this_col:                  # [ADDED]
-    li   $s2, 0                  # row = 0..111
+    li   $s2, 0                  # row = 0..11
 vert_row_loop:
     mul  $t0, $s2, 7
     add  $t0, $t0, $s1
@@ -437,11 +451,7 @@ vert_row_loop:
 next_vert_row:
     addi $s2, $s2, 1
     blt  $s2, 12, vert_row_loop
-    addi $s1, $s1, 1
-    blt  $s1, 7, vert_col_loop
 
-    # If no vertical match-3 triggered, exit chain_loop
-    beq  $s0, $zero, resolve_done
 next_vert_col:
     addi $s1, $s1, 1
     blt  $s1, 7, vert_col_loop
