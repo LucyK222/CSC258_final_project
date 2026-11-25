@@ -1,7 +1,7 @@
 ################# CSC258 Assembly Final Project ###################
 # This file contains our implementation of Magical Drop.
 #
-# Student 1: Jiayun Kang, Student Number
+# Student 1: Jiayun Kang, 1009918074
 # Student 2: Bowen Guang, 1010490808
 #
 # We assert that the code submitted here is entirely our own 
