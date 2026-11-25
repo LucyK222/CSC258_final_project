@@ -1,7 +1,7 @@
 ################# CSC258 Assembly Final Project ###################
 # This file contains our implementation of Magical Drop.
 #
-# Student 1: Jiayun Kang, 1009918074
+# Student 1: Jiayun Kang, Student Number
 # Student 2: Bowen Guang, 1010490808
 #
 # We assert that the code submitted here is entirely our own 
@@ -131,6 +131,11 @@ poop_270:
     .word 0x000000, 0x92400E, 0x92400E, 0x292524
     .word 0x92400E, 0xD6A56D, 0x92400E, 0x292524
     .word 0x000000, 0x92400E, 0x292524, 0x92400E
+    
+pink_bow:
+    .word 0x000000, 0xff69b4, 0x000000
+    .word 0xff69b4, 0xff1493, 0xff69b4
+    .word 0x000000, 0xff69b4, 0x000000
 
     .align 2
 
@@ -1579,6 +1584,8 @@ next_grid_cell:
     lw   $a1, p2_held_color
     lw   $a2, p2_held_count
     jal  draw_single_poop
+    
+    jal  draw_pink_bow
 
     lw   $ra, 0($sp)
     addi $sp, $sp, 4
@@ -1691,4 +1698,51 @@ bgm_advance_note:
 
 bgm_tick_done:
     sw   $t3, bgm_next_note
+    jr   $ra
+    
+# Draw a 3x3 pink flower inside Player 2's 4x4 region
+draw_pink_bow:
+    lw   $t0, ADDR_DSPL
+
+    # Calculate flower's starting x coordinate
+    lw   $t1, p2_col
+    sll  $t1, $t1, 2
+    addi $t1, $t1, 12
+
+    # Starting y coordinate
+    li   $t2, 60
+
+    la   $t3, pink_bow
+    li   $t4, 0
+
+bow_row_loop:
+    li   $t5, 0
+
+bow_col_loop:
+    lw   $t6, 0($t3)
+    beq  $t6, $zero, bow_skip_pixel
+
+    # Calculate y offset
+    add  $t7, $t2, $t4
+    sll  $t7, $t7, 8
+
+    # Calculate x offset
+    add  $t8, $t1, $t5
+    sll  $t8, $t8, 2
+
+    # Calculate final display address
+    add  $t7, $t7, $t8
+    add  $t7, $t7, $t0
+
+    # Draw pixel
+    sw   $t6, 0($t7)
+
+bow_skip_pixel:
+    addi $t3, $t3, 4
+    addi $t5, $t5, 1
+    blt  $t5, 3, bow_col_loop
+
+    addi $t4, $t4, 1
+    blt  $t4, 3, bow_row_loop
+
     jr   $ra
